@@ -1,0 +1,11 @@
+deap
+pandas
+prophet
+plotly
+faker
+openpyxl
+tqdm
+streamlit 
+# SQLAlchemy и psycopg2, если вы их используете
+SQLAlchemy
+psycopg2-binary
