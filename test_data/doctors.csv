@@ -1,0 +1,6 @@
+doctor_id,name,specialty,shift_type,experience_years
+DOC001,Иванов И.И.,Терапевт,morning,5
+DOC002,Петров П.П.,Кардиолог,day,10
+DOC003,Сидоров С.С.,Педиатр,evening,3
+DOC004,Козлова К.К.,Гинеколог,day,8
+DOC005,Новиков Н.Н.,Невролог,morning,12
