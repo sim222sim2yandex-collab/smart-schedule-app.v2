@@ -90,24 +90,24 @@ class ScheduleGenerator:
             star_assignments = self._assign_star_doctors(day, available_doctors)
             day_assignments.extend(star_assignments)
             
-            # Remove assigned doctors from available pool
-            assigned_doctor_ids = {gene['doctor_id'] for gene in star_assignments}
-            available_doctors = [d for d in available_doctors if d['doctor_id'] not in assigned_doctor_ids]
+            # Remove assigned doctors from available pool for overlapping times
+            available_doctors = self._filter_available_doctors_by_existing_assignments(
+                available_doctors, star_assignments
+            )
+        
+        # Sort slots by time to assign them in chronological order
+        demand_slots.sort(key=lambda x: (x['hour'], x.get('minute', 0)))
         
         # Assign remaining slots
-        remaining_slots = self._calculate_remaining_slots(demand_slots, day_assignments)
-        
-        for slot in remaining_slots:
+        for slot in demand_slots:
             if available_doctors:
-                assignment = self._assign_doctor_to_slot(
-                    slot, available_doctors, enforce_shifts, enforce_specializations, enforce_cabinet_bindings
+                assignment = self._assign_doctor_to_slot_with_conflict_check(
+                    slot, available_doctors, day_assignments, enforce_shifts, 
+                    enforce_specializations, enforce_cabinet_bindings
                 )
                 
                 if assignment:
                     day_assignments.append(assignment)
-                    
-                    # Update available doctors (consider daily limits)
-                    available_doctors = self._update_available_doctors(available_doctors, assignment)
         
         return day_assignments
     
@@ -137,12 +137,15 @@ class ScheduleGenerator:
     def _get_day_demand(self, day):
         """Get demand forecast for a specific day"""
         
-        day_str = day.strftime('%Y-%m-%d')
-        day_demand = self.demand_forecast[
-            pd.to_datetime(self.demand_forecast['date']).dt.strftime('%Y-%m-%d') == day_str
-        ].copy()
+        # For now, use the same demand pattern for all working days
+        # In a real implementation, this would be more sophisticated
+        if not self.demand_forecast.empty:
+            # Use the first forecast entry as a template for all days
+            day_demand = self.demand_forecast.copy()
+            day_demand['date'] = day.strftime('%Y-%m-%d')
+            return day_demand
         
-        return day_demand if not day_demand.empty else pd.DataFrame()
+        return pd.DataFrame()
     
     def _create_demand_slots(self, day, day_demand):
         """Convert daily demand into time slots"""
@@ -154,18 +157,35 @@ class ScheduleGenerator:
             total_demand = int(demand_row['predicted_demand'])
             dms_demand = int(demand_row['dms_demand'])
             
-            # Create hourly slots (simplified - 8 working hours)
-            slots_per_hour = max(1, total_demand // 8)
-            
-            for hour in range(8, 18):  # 8 AM to 6 PM
-                for slot_num in range(slots_per_hour):
-                    slots.append({
-                        'day': day,
-                        'hour': hour,
-                        'service': service,
-                        'is_dms': random.random() < (dms_demand / total_demand) if total_demand > 0 else False,
-                        'slot_id': f"{day.strftime('%Y%m%d')}_{hour:02d}_{slot_num:02d}"
-                    })
+            # Create individual appointment slots based on actual demand
+            for slot_num in range(total_demand):
+                # Distribute slots across working hours (8 AM to 6 PM)
+                hour = 8 + (slot_num % 10)  # 10 working hours
+                minute = (slot_num // 10) * 30  # 30-minute slots
+                
+                if minute >= 60:
+                    hour += minute // 60
+                    minute = minute % 60
+                
+                # Skip lunch break (12-13)
+                if hour == 12:
+                    hour = 13
+                
+                # Don't exceed working hours
+                if hour >= 18:
+                    hour = 8 + (slot_num % 9)  # Skip lunch hour
+                    if hour >= 12:
+                        hour += 1
+                
+                slots.append({
+                    'day': day,
+                    'hour': hour,
+                    'minute': minute,
+                    'service': service,
+                    'is_dms': slot_num < dms_demand,  # First N slots are DMS
+                    'slot_id': f"{day.strftime('%Y%m%d')}_{hour:02d}_{minute:02d}_{slot_num:03d}",
+                    'duration_minutes': 30  # Standard appointment duration
+                })
         
         return slots
     
@@ -235,17 +255,47 @@ class ScheduleGenerator:
         # Find suitable cabinet (consider bindings)
         suitable_cabinet = self._find_suitable_cabinet_for_doctor(doctor)
         
-        if suitable_cabinet:
-            shift_times = self.shift_definitions.get(shift, self.shift_definitions['day'])
-            
-            return [{
-                'cabinet_id': suitable_cabinet['cabinet_id'],
-                'shift': shift,
-                'start_time': shift_times['start'],
-                'end_time': shift_times['end']
-            }]
+        if not suitable_cabinet:
+            return []
         
-        return []
+        # Create multiple time slots instead of one long shift
+        appointments = []
+        shift_ranges = {
+            'morning': (8, 14),   # 8:00 - 14:00
+            'evening': (14, 20),  # 14:00 - 20:00
+            'day': (9, 18),       # 9:00 - 18:00
+            'night': (20, 8)      # 20:00 - 8:00 (next day)
+        }
+        
+        if shift in shift_ranges:
+            start_hour, end_hour = shift_ranges[shift]
+            
+            # Create 30-minute appointment slots
+            current_hour = start_hour
+            while current_hour < end_hour:
+                # Skip lunch break for day shifts
+                if shift == 'day' and current_hour == 12:
+                    current_hour = 13
+                    continue
+                
+                appointments.append({
+                    'cabinet_id': suitable_cabinet['cabinet_id'],
+                    'shift': shift,
+                    'start_time': f"{current_hour:02d}:00",
+                    'end_time': f"{current_hour:02d}:30"
+                })
+                
+                appointments.append({
+                    'cabinet_id': suitable_cabinet['cabinet_id'],
+                    'shift': shift,
+                    'start_time': f"{current_hour:02d}:30",
+                    'end_time': f"{current_hour+1:02d}:00"
+                })
+                
+                current_hour += 1
+        
+        # Limit to reasonable number of appointments (e.g., 4-6 per day)
+        return appointments[:6]
     
     def _calculate_remaining_slots(self, demand_slots, existing_assignments):
         """Calculate slots that still need to be filled"""
@@ -278,17 +328,29 @@ class ScheduleGenerator:
         if not suitable_cabinet:
             return None
         
+        # Calculate precise time slots
+        start_hour = slot['hour']
+        start_minute = slot.get('minute', 0)
+        duration = slot.get('duration_minutes', 30)
+        
+        end_minute = start_minute + duration
+        end_hour = start_hour
+        if end_minute >= 60:
+            end_hour += end_minute // 60
+            end_minute = end_minute % 60
+        
         # Create gene
         gene = {
             'day': slot['day'],
             'doctor_id': selected_doctor['doctor_id'],
             'cabinet_id': suitable_cabinet['cabinet_id'],
             'shift': selected_doctor.get('shift_type', 'day'),
-            'start_time': f"{slot['hour']:02d}:00",
-            'end_time': f"{slot['hour']+1:02d}:00",
+            'start_time': f"{start_hour:02d}:{start_minute:02d}",
+            'end_time': f"{end_hour:02d}:{end_minute:02d}",
             'service': slot['service'],
             'is_dms': slot['is_dms'],
-            'slot_id': slot['slot_id']
+            'slot_id': slot['slot_id'],
+            'duration_minutes': duration
         }
         
         return gene
@@ -319,14 +381,23 @@ class ScheduleGenerator:
         doctor_shift = doctor.get('shift_type', 'day')
         slot_hour = slot['hour']
         
-        if doctor_shift == 'morning' and slot_hour >= 14:
-            return False
-        elif doctor_shift == 'evening' and slot_hour < 14:
-            return False
-        elif doctor_shift == 'night' and 8 <= slot_hour < 20:
-            return False
+        # Define shift time ranges
+        shift_ranges = {
+            'morning': (8, 14),   # 8:00 - 14:00
+            'evening': (14, 20),  # 14:00 - 20:00
+            'day': (9, 18),       # 9:00 - 18:00
+            'night': (20, 8)      # 20:00 - 8:00 (next day)
+        }
         
-        return True
+        if doctor_shift in shift_ranges:
+            start_hour, end_hour = shift_ranges[doctor_shift]
+            
+            if doctor_shift == 'night':  # Special case for night shift
+                return slot_hour >= start_hour or slot_hour < end_hour
+            else:
+                return start_hour <= slot_hour < end_hour
+        
+        return True  # Default: allow if shift not defined
     
     def _is_specialization_compatible(self, doctor, slot):
         """Check if doctor's specialization matches required service"""
@@ -419,20 +490,13 @@ class ScheduleGenerator:
             if not all(field in gene for field in required_fields):
                 return False
         
-        # Check for conflicts (same cabinet, same time)
-        time_slots = {}
+        # Check for time conflicts (same cabinet, overlapping times)
+        if not self._check_cabinet_availability(chromosome):
+            return False
         
-        for gene in chromosome:
-            day = gene['day']
-            cabinet_id = gene['cabinet_id']
-            start_time = gene['start_time']
-            
-            slot_key = f"{day}_{cabinet_id}_{start_time}"
-            
-            if slot_key in time_slots:
-                return False  # Conflict detected
-            
-            time_slots[slot_key] = gene
+        # Check for doctor overload (same doctor, overlapping times)
+        if not self._check_doctor_availability(chromosome):
+            return False
         
         return True
     
@@ -468,4 +532,179 @@ class ScheduleGenerator:
         
         # Add more detailed validations as needed
         
+        # Cabinet availability validation
+        if not self._check_cabinet_availability(chromosome):
+            validation_results['cabinet_availability'] = False
+        
+        # Doctor availability validation
+        if not self._check_doctor_availability(chromosome):
+            validation_results['doctor_availability'] = True  # Add this field
+        
         return validation_results
+    
+    def _check_cabinet_availability(self, chromosome):
+        """Check for cabinet time conflicts"""
+        
+        cabinet_schedule = {}  # cabinet_id -> list of (start_time, end_time, day)
+        
+        for gene in chromosome:
+            cabinet_id = gene['cabinet_id']
+            day = gene['day']
+            start_time = gene['start_time']
+            end_time = gene['end_time']
+            
+            # Convert time strings to minutes for easier comparison
+            start_minutes = self._time_to_minutes(start_time)
+            end_minutes = self._time_to_minutes(end_time)
+            
+            if cabinet_id not in cabinet_schedule:
+                cabinet_schedule[cabinet_id] = []
+            
+            # Check for conflicts with existing appointments
+            for existing_start, existing_end, existing_day in cabinet_schedule[cabinet_id]:
+                if day == existing_day:  # Same day
+                    # Check for time overlap
+                    if not (end_minutes <= existing_start or start_minutes >= existing_end):
+                        return False  # Conflict found
+            
+            cabinet_schedule[cabinet_id].append((start_minutes, end_minutes, day))
+        
+        return True
+    
+    def _check_doctor_availability(self, chromosome):
+        """Check for doctor time conflicts"""
+        
+        doctor_schedule = {}  # doctor_id -> list of (start_time, end_time, day)
+        
+        for gene in chromosome:
+            doctor_id = gene['doctor_id']
+            day = gene['day']
+            start_time = gene['start_time']
+            end_time = gene['end_time']
+            
+            # Convert time strings to minutes for easier comparison
+            start_minutes = self._time_to_minutes(start_time)
+            end_minutes = self._time_to_minutes(end_time)
+            
+            if doctor_id not in doctor_schedule:
+                doctor_schedule[doctor_id] = []
+            
+            # Check for conflicts with existing appointments
+            for existing_start, existing_end, existing_day in doctor_schedule[doctor_id]:
+                if day == existing_day:  # Same day
+                    # Check for time overlap
+                    if not (end_minutes <= existing_start or start_minutes >= existing_end):
+                        return False  # Conflict found
+            
+            doctor_schedule[doctor_id].append((start_minutes, end_minutes, day))
+        
+        return True
+    
+    def _time_to_minutes(self, time_str):
+        """Convert time string (HH:MM) to minutes since midnight"""
+        try:
+            hours, minutes = map(int, time_str.split(':'))
+            return hours * 60 + minutes
+        except:
+            return 0
+    
+    def _filter_available_doctors_by_existing_assignments(self, available_doctors, existing_assignments):
+        """Filter doctors based on existing time assignments"""
+        
+        # For now, keep all doctors available but we'll check conflicts during assignment
+        # In a more sophisticated implementation, we could pre-filter based on time conflicts
+        return available_doctors
+    
+    def _assign_doctor_to_slot_with_conflict_check(self, slot, available_doctors, existing_assignments,
+                                                 enforce_shifts, enforce_specializations, enforce_cabinet_bindings):
+        """Assign doctor to slot with conflict checking"""
+        
+        # Filter doctors by constraints
+        suitable_doctors = self._filter_suitable_doctors(
+            available_doctors, slot, enforce_shifts, enforce_specializations
+        )
+        
+        if not suitable_doctors:
+            return None
+        
+        # Try each suitable doctor until we find one without conflicts
+        random.shuffle(suitable_doctors)  # Randomize for genetic diversity
+        
+        for doctor in suitable_doctors:
+            # Find suitable cabinet
+            suitable_cabinet = self._find_suitable_cabinet_for_doctor(
+                doctor, enforce_cabinet_bindings
+            )
+            
+            if not suitable_cabinet:
+                continue
+            
+            # Create potential assignment
+            potential_gene = self._create_gene_from_slot_and_doctor(slot, doctor, suitable_cabinet)
+            
+            # Check for conflicts with existing assignments
+            if self._has_conflicts_with_existing(potential_gene, existing_assignments):
+                continue
+            
+            return potential_gene
+        
+        return None  # No suitable doctor found without conflicts
+    
+    def _create_gene_from_slot_and_doctor(self, slot, doctor, cabinet):
+        """Create a gene from slot, doctor, and cabinet information"""
+        
+        # Calculate precise time slots
+        start_hour = slot['hour']
+        start_minute = slot.get('minute', 0)
+        duration = slot.get('duration_minutes', 30)
+        
+        end_minute = start_minute + duration
+        end_hour = start_hour
+        if end_minute >= 60:
+            end_hour += end_minute // 60
+            end_minute = end_minute % 60
+        
+        return {
+            'day': slot['day'],
+            'doctor_id': doctor['doctor_id'],
+            'cabinet_id': cabinet['cabinet_id'],
+            'shift': doctor.get('shift_type', 'day'),
+            'start_time': f"{start_hour:02d}:{start_minute:02d}",
+            'end_time': f"{end_hour:02d}:{end_minute:02d}",
+            'service': slot['service'],
+            'is_dms': slot['is_dms'],
+            'slot_id': slot['slot_id'],
+            'duration_minutes': duration
+        }
+    
+    def _has_conflicts_with_existing(self, potential_gene, existing_assignments):
+        """Check if potential gene conflicts with existing assignments"""
+        
+        doctor_id = potential_gene['doctor_id']
+        cabinet_id = potential_gene['cabinet_id']
+        day = potential_gene['day']
+        start_time = potential_gene['start_time']
+        end_time = potential_gene['end_time']
+        
+        start_minutes = self._time_to_minutes(start_time)
+        end_minutes = self._time_to_minutes(end_time)
+        
+        for existing_gene in existing_assignments:
+            existing_day = existing_gene['day']
+            
+            if day != existing_day:
+                continue  # Different day, no conflict
+            
+            existing_start = self._time_to_minutes(existing_gene['start_time'])
+            existing_end = self._time_to_minutes(existing_gene['end_time'])
+            
+            # Check for time overlap
+            time_overlap = not (end_minutes <= existing_start or start_minutes >= existing_end)
+            
+            if time_overlap:
+                # Check if same doctor or same cabinet
+                if (doctor_id == existing_gene['doctor_id'] or 
+                    cabinet_id == existing_gene['cabinet_id']):
+                    return True  # Conflict found
+        
+        return False  # No conflicts
