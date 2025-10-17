@@ -25,37 +25,77 @@ class ScheduleGenerator:
         """Generate a population of valid schedules (chromosomes)"""
         
         population = []
-        attempts = 0
-        max_attempts = population_size * 10  # Prevent infinite loops
-        
-        # Get working days for the target month
-        working_days = self._get_working_days(target_month)
-        
-        while len(population) < population_size and attempts < max_attempts:
-            attempts += 1
-            
-            try:
-                chromosome = self._generate_single_schedule(
-                    working_days, enforce_shifts, enforce_specializations,
-                    enforce_star_schedules, enforce_cabinet_bindings
-                )
-                
-                if self._is_valid_schedule(chromosome):
-                    population.append(chromosome)
-                    
-            except Exception as e:
-                # Log error but continue trying
-                print(f"Error generating schedule (attempt {attempts}): {str(e)}")
-                continue
+        for _ in range(population_size):
+            chromosome = self._generate_single_resource_based_schedule(
+                target_month, enforce_shifts, enforce_specializations,
+                enforce_star_schedules, enforce_cabinet_bindings
+            )
+            if chromosome and self._is_valid_schedule(chromosome):
+                population.append(chromosome)
         
         if len(population) < population_size:
-            print(f"Warning: Only generated {len(population)} valid schedules out of {population_size} requested")
+            print(f"Warning: Only generated {len(population)} valid schedules out of {population_size} requested.")
         
         return population
+
+    def _generate_single_resource_based_schedule(self, target_month, enforce_shifts, enforce_specializations,
+                                                 enforce_star_schedules, enforce_cabinet_bindings):
+        """Generate a single valid schedule based on available resources."""
+        schedule = []
+        working_days = self._get_working_days(target_month)
+
+        for day in working_days:
+            available_doctors = self._get_available_doctors(day)
+            occupied_cabinets = set()
+            random.shuffle(available_doctors)
+
+            for doctor in available_doctors:
+                suitable_cabinet = self._find_suitable_and_available_cabinet(
+                    doctor, occupied_cabinets, enforce_cabinet_bindings
+                )
+                if suitable_cabinet:
+                    shift_type = doctor.get('shift_type', 'day')
+                    shift_times = self.shift_definitions.get(shift_type, self.shift_definitions['day'])
+                    
+                    # Create genes for each hour of the shift
+                    start_hour = int(shift_times['start'].split(':')[0])
+                    end_hour = int(shift_times['end'].split(':')[0])
+                    
+                    for hour in range(start_hour, end_hour):
+                        gene = {
+                            'day': day,
+                            'doctor_id': doctor['doctor_id'],
+                            'cabinet_id': suitable_cabinet['cabinet_id'],
+                            'shift': shift_type,
+                            'start_time': f"{hour:02d}:00",
+                            'end_time': f"{hour+1:02d}:00",
+                            'service': doctor.get('specialty', 'general')
+                        }
+                        schedule.append(gene)
+                    
+                    occupied_cabinets.add(suitable_cabinet['cabinet_id'])
+        return schedule
+
+    def _find_suitable_and_available_cabinet(self, doctor, occupied_cabinets, enforce_bindings):
+        """Finds a cabinet that is suitable for the doctor and not already occupied."""
+        doctor_specialty = doctor.get('specialty', '')
+        potential_cabinets = []
+
+        for _, cabinet in self.cabinets_df.iterrows():
+            if cabinet['cabinet_id'] in occupied_cabinets:
+                continue
+
+            allowed_specialties_raw = cabinet.get('specialty_allowed', '')
+            allowed_specialties = [s.strip() for s in str(allowed_specialties_raw).split(',') if s.strip()]
+
+            if not allowed_specialties or "Общая консультация" in allowed_specialties or doctor_specialty in allowed_specialties:
+                potential_cabinets.append(cabinet.to_dict())
+
+        return random.choice(potential_cabinets) if potential_cabinets else None
     
     def _generate_single_schedule(self, working_days, enforce_shifts, enforce_specializations,
                                 enforce_star_schedules, enforce_cabinet_bindings):
-        """Generate a single valid schedule (chromosome)"""
+        """DEPRECATED: Generate a single valid schedule (chromosome)"""
         
         schedule = []  # List of genes
         
@@ -72,7 +112,7 @@ class ScheduleGenerator:
             schedule.extend(day_assignments)
         
         return schedule
-    
+
     def _generate_day_assignments(self, day, day_demand, enforce_shifts, enforce_specializations,
                                 enforce_star_schedules, enforce_cabinet_bindings):
         """Generate doctor-cabinet assignments for a single day"""
@@ -151,21 +191,23 @@ class ScheduleGenerator:
         
         for _, demand_row in day_demand.iterrows():
             service = demand_row['service']
-            total_demand = int(demand_row['predicted_demand'])
-            dms_demand = int(demand_row['dms_demand'])
+            total_demand = int(demand_row.get('predicted_demand', 0))
+            dms_demand = int(demand_row.get('dms_demand', 0))
             
-            # Create hourly slots (simplified - 8 working hours)
-            slots_per_hour = max(1, total_demand // 8)
-            
-            for hour in range(8, 18):  # 8 AM to 6 PM
-                for slot_num in range(slots_per_hour):
-                    slots.append({
-                        'day': day,
-                        'hour': hour,
-                        'service': service,
-                        'is_dms': random.random() < (dms_demand / total_demand) if total_demand > 0 else False,
-                        'slot_id': f"{day.strftime('%Y%m%d')}_{hour:02d}_{slot_num:02d}"
-                    })
+            # Only create slots if there is demand
+            if total_demand > 0:
+                # Create hourly slots (simplified - 8 working hours)
+                slots_per_hour = max(1, total_demand // 8)
+                
+                for hour in range(8, 18):  # 8 AM to 6 PM
+                    for slot_num in range(slots_per_hour):
+                        slots.append({
+                            'day': day,
+                            'hour': hour,
+                            'service': service,
+                            'is_dms': random.random() < (dms_demand / total_demand) if total_demand > 0 else False,
+                            'slot_id': f"{day.strftime('%Y%m%d')}_{service}_{hour:02d}_{slot_num:02d}"
+                        })
         
         return slots
     
@@ -265,6 +307,7 @@ class ScheduleGenerator:
         )
         
         if not suitable_doctors:
+            # print(f"Debug: No suitable doctors for slot {slot['service']} at {slot['day']} {slot['hour']}:00")
             return None
         
         # Select doctor (random selection for genetic diversity)
@@ -276,6 +319,7 @@ class ScheduleGenerator:
         )
         
         if not suitable_cabinet:
+            # print(f"Debug: No suitable cabinet for doctor {selected_doctor['doctor_id']} for slot {slot['service']}")
             return None
         
         # Create gene
@@ -332,24 +376,34 @@ class ScheduleGenerator:
         """Check if doctor's specialization matches required service"""
         
         doctor_specialty = doctor.get('specialty', '').lower()
-        service = slot.get('service', '').lower()
+        service_name = slot.get('service', '').lower()
         
-        # Simplified mapping - in reality this would be more comprehensive
-        specialty_service_mapping = {
-            'терапевт': ['прием терапевта', 'консультация терапевта', 'общий осмотр'],
-            'кардиолог': ['прием кардиолога', 'кардиологический осмотр', 'экг'],
-            'педиатр': ['прием педиатра', 'детский осмотр'],
-            'гинеколог': ['прием гинеколога', 'гинекологический осмотр'],
-            'невролог': ['прием невролога', 'неврологический осмотр']
+        # More robust mapping of specialties to service keywords
+        specialty_map = {
+            'дерматология': 'дерматолог',
+            'офтальмология': 'офтальмолог',
+            'кардиология': 'кардиолог',
+            'оториноларингология': 'оториноларинголог',
+            'неврология': 'невролог',
+            'терапия': 'терапевт',
+            'хирургия': 'хирург',
+            'педиатрия': 'педиатр',
+            'гинекология': 'гинеколог',
+            'урология': 'уролог',
+            'гастроэнтерология': 'гастроэнтеролог',
+            'эндокринология': 'эндокринолог',
+            'стоматология': 'стоматолог'
         }
         
-        allowed_services = specialty_service_mapping.get(doctor_specialty, [])
+        # Get the keyword for the doctor's specialty
+        specialty_keyword = specialty_map.get(doctor_specialty)
         
-        # If no specific mapping, allow (flexible assignment)
-        if not allowed_services:
+        if not specialty_keyword:
+            # If specialty is not in our map, we can't be sure, so we allow it
             return True
-        
-        return any(allowed in service for allowed in allowed_services)
+            
+        # Check if the service name contains the specialty keyword
+        return specialty_keyword in service_name
     
     def _find_suitable_cabinet_for_doctor(self, doctor, enforce_cabinet_bindings=True):
         """Find suitable cabinet for doctor"""
@@ -366,16 +420,33 @@ class ScheduleGenerator:
                 return bound_cabinet.iloc[0].to_dict()
         
         # Find cabinets that allow this specialty
-        suitable_cabinets = []
+        specific_cabinets = []
+        general_cabinets = []
         
         for _, cabinet in self.cabinets_df.iterrows():
-            allowed_specialties = cabinet.get('specialty_allowed', [])
+            allowed_specialties_raw = cabinet.get('specialty_allowed', '')
             
-            if isinstance(allowed_specialties, list):
-                if doctor_specialty in allowed_specialties or len(allowed_specialties) == 0:
-                    suitable_cabinets.append(cabinet.to_dict())
+            # Handle both list and string formats for allowed specialties
+            if isinstance(allowed_specialties_raw, str):
+                allowed_specialties = [s.strip() for s in allowed_specialties_raw.split(',') if s.strip()]
+            elif isinstance(allowed_specialties_raw, list):
+                allowed_specialties = [s.strip() for s in allowed_specialties_raw if s.strip()]
+            else:
+                allowed_specialties = []
+
+            if not allowed_specialties: # If no specific specialties are listed, it's a general cabinet
+                general_cabinets.append(cabinet.to_dict())
+            elif "Общая консультация" in allowed_specialties or "Процедурный кабинет" in allowed_specialties: # General purpose cabinets
+                general_cabinets.append(cabinet.to_dict())
+            elif doctor_specialty in allowed_specialties:
+                specific_cabinets.append(cabinet.to_dict())
         
-        return random.choice(suitable_cabinets) if suitable_cabinets else None
+        if specific_cabinets:
+            return random.choice(specific_cabinets)
+        elif general_cabinets:
+            return random.choice(general_cabinets)
+        
+        return None
     
     def _update_available_doctors(self, available_doctors, assignment):
         """Update available doctors after assignment (consider daily limits)"""
@@ -397,11 +468,22 @@ class ScheduleGenerator:
             compatible_cabinets = []
             
             for _, cabinet in self.cabinets_df.iterrows():
-                allowed_specialties = cabinet.get('specialty_allowed', [])
+                allowed_specialties_raw = cabinet.get('specialty_allowed', '')
                 
-                if isinstance(allowed_specialties, list):
-                    if doctor_specialty in allowed_specialties or len(allowed_specialties) == 0:
-                        compatible_cabinets.append(cabinet['cabinet_id'])
+                # Handle both list and string formats for allowed specialties
+                if isinstance(allowed_specialties_raw, str):
+                    allowed_specialties = [s.strip() for s in allowed_specialties_raw.split(',') if s.strip()]
+                elif isinstance(allowed_specialties_raw, list):
+                    allowed_specialties = [s.strip() for s in allowed_specialties_raw if s.strip()]
+                else:
+                    allowed_specialties = []
+
+                if not allowed_specialties: # If no specific specialties are listed, it's a general cabinet
+                    compatible_cabinets.append(cabinet['cabinet_id'])
+                elif "Общая консультация" in allowed_specialties or "Процедурный кабинет" in allowed_specialties: # General purpose cabinets
+                    compatible_cabinets.append(cabinet['cabinet_id'])
+                elif doctor_specialty in allowed_specialties:
+                    compatible_cabinets.append(cabinet['cabinet_id'])
             
             compatibility[doctor_id] = compatible_cabinets
         

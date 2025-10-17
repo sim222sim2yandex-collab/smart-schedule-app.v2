@@ -5,6 +5,7 @@ Script to load data from Excel file into PostgreSQL database
 import pandas as pd
 from database_manager import DatabaseManager
 import sys
+from data_processor import DataProcessor
 
 def load_excel_to_database(excel_file_path):
     """Load all data from Excel file to database"""
@@ -13,6 +14,7 @@ def load_excel_to_database(excel_file_path):
     
     try:
         db = DatabaseManager()
+        processor = DataProcessor()
         print("✓ Connected to database")
         
         # Load Doctors
@@ -76,6 +78,38 @@ def load_excel_to_database(excel_file_path):
         print(f"\n❌ Error loading data: {str(e)}")
         sys.exit(1)
 
+def load_all_data_to_db():
+    """Load all reference data from CSV files into the database"""
+    
+    db_manager = DatabaseManager()
+    processor = DataProcessor()
+    
+    # File paths
+    files = {
+        'doctors': 'test_doctors.csv',
+        'cabinets': 'test_cabinets.csv',
+        'appointments': 'test_appointments.csv',
+        'revenue': 'test_revenue.csv',
+    }
+    
+    # Load and insert data
+    for table_name, file_path in files.items():
+        try:
+            df = processor.load_file(file_path)
+            
+            # For main tables, insert into DB
+            if table_name in ['doctors', 'cabinets', 'appointments', 'revenue']:
+                count = db_manager.insert_data(table_name, df)
+                print(f"Inserted {count} records into '{table_name}' from '{file_path}'")
+            
+        except FileNotFoundError:
+            print(f"Warning: File not found at '{file_path}'. Skipping.")
+        except Exception as e:
+            print(f"Error loading data for '{table_name}': {str(e)}")
+            
+    print("Data loading process complete.")
+
 if __name__ == "__main__":
     excel_file = "attached_assets/Структура данных для составления динамического расписания врачей_1759756400921.xlsx"
     load_excel_to_database(excel_file)
+    load_all_data_to_db()

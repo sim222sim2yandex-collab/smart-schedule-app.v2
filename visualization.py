@@ -18,6 +18,7 @@ class VisualizationManager:
         
         # Convert schedule to DataFrame
         schedule_df = pd.DataFrame(schedule)
+        schedule_df['day'] = pd.to_datetime(schedule_df['day'])
         
         # Filter for target month
         month_schedules = []
@@ -105,6 +106,7 @@ class VisualizationManager:
             return pd.DataFrame()
         
         schedule_df = pd.DataFrame(schedule)
+        schedule_df['day'] = pd.to_datetime(schedule_df['day'])
         
         # Filter for selected date
         daily_schedule = schedule_df[
@@ -132,6 +134,7 @@ class VisualizationManager:
             return pd.DataFrame()
         
         schedule_df = pd.DataFrame(schedule)
+        schedule_df['day'] = pd.to_datetime(schedule_df['day'])
         
         # Calculate workload per doctor
         doctor_workload = schedule_df.groupby('doctor_id').agg({
@@ -166,6 +169,7 @@ class VisualizationManager:
             return pd.DataFrame()
         
         schedule_df = pd.DataFrame(schedule)
+        schedule_df['day'] = pd.to_datetime(schedule_df['day'])
         
         # Add day of week information
         schedule_df['day_of_week'] = schedule_df['day'].dt.day_name()
@@ -284,6 +288,7 @@ class VisualizationManager:
             demand_by_date['supply'] = 0
         else:
             schedule_df = pd.DataFrame(schedule)
+            schedule_df['day'] = pd.to_datetime(schedule_df['day'])
             
             # Aggregate supply by date
             schedule_df['date'] = schedule_df['day']

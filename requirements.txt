@@ -1,0 +1,9 @@
+deap
+pandas
+prophet
+plotly
+faker
+openpyxl
+tqdm
+streamlit
+SQLAlchemy

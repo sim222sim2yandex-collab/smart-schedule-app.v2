@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import io
 import os
+
+# Application modules
 from data_processor import DataProcessor
 from forecasting import DemandForecaster
 from genetic_algorithm import ScheduleOptimizer
@@ -77,9 +79,11 @@ def phase1_data_preparation():
         cabinets_file = st.file_uploader("Справочник кабинетов", type=['csv', 'xlsx'])
         appointments_file = st.file_uploader("История записей", type=['csv', 'xlsx'])
         revenue_file = st.file_uploader("Отчет по доходам", type=['csv', 'xlsx'])
+        seasonal_file = st.file_uploader("Справочник сезонных коэффициентов", type=['csv', 'xlsx'])
+        promo_file = st.file_uploader("Календарь маркетинговых акций", type=['csv', 'xlsx'])
         
         if st.button("Загрузить и обработать данные"):
-            if all([doctors_file, cabinets_file, appointments_file, revenue_file]):
+            if all([doctors_file, cabinets_file, appointments_file, revenue_file, seasonal_file, promo_file]):
                 try:
                     processor = DataProcessor()
                     
@@ -89,15 +93,19 @@ def phase1_data_preparation():
                         cabinets_df = processor.load_file(cabinets_file)
                         appointments_df = processor.load_file(appointments_file)
                         revenue_df = processor.load_file(revenue_file)
+                        seasonal_df = processor.load_file(seasonal_file)
+                        promo_df = processor.load_file(promo_file)
                         
                         # Validate and clean data
                         validation_results = processor.validate_data_structure(
-                            doctors_df, cabinets_df, appointments_df, revenue_df
+                            doctors_df, cabinets_df, appointments_df, revenue_df,
+                            seasonal_df, promo_df
                         )
                         
                         if validation_results['valid']:
                             cleaned_data = processor.clean_data(
-                                doctors_df, cabinets_df, appointments_df, revenue_df
+                                doctors_df, cabinets_df, appointments_df, revenue_df,
+                                seasonal_df, promo_df
                             )
                             
                             # Store in session state
@@ -105,6 +113,8 @@ def phase1_data_preparation():
                             st.session_state.cabinets_df = cleaned_data['cabinets']
                             st.session_state.appointments_df = cleaned_data['appointments']
                             st.session_state.revenue_df = cleaned_data['revenue']
+                            st.session_state.seasonal_df = cleaned_data['seasonal']
+                            st.session_state.promo_df = cleaned_data['promo']
                             st.session_state.data_loaded = True
                             
                             st.success("Данные успешно загружены и обработаны!")
@@ -121,18 +131,22 @@ def phase1_data_preparation():
             st.subheader("Статистика загруженных данных")
             
             # Display data statistics
-            col2a, col2b = st.columns(2)
+            col2a, col2b, col2c = st.columns(3)
             with col2a:
                 st.metric("Врачи", len(st.session_state.doctors_df))
                 st.metric("Кабинеты", len(st.session_state.cabinets_df))
             with col2b:
                 st.metric("Записи", len(st.session_state.appointments_df))
                 st.metric("Отчеты доходов", len(st.session_state.revenue_df))
+            with col2c:
+                st.metric("Сезонные коэффициенты", len(st.session_state.seasonal_df))
+                st.metric("Маркетинговые акции", len(st.session_state.promo_df))
             
             # Show sample data
             st.subheader("Предварительный просмотр данных")
             data_type = st.selectbox("Выберите справочник", 
-                                   ["Врачи", "Кабинеты", "История записей", "Доходы"])
+                                   ["Врачи", "Кабинеты", "История записей", "Доходы", 
+                                    "Сезонные коэффициенты", "Маркетинговые акции"])
             
             if data_type == "Врачи":
                 st.dataframe(st.session_state.doctors_df.head())
@@ -140,8 +154,12 @@ def phase1_data_preparation():
                 st.dataframe(st.session_state.cabinets_df.head())
             elif data_type == "История записей":
                 st.dataframe(st.session_state.appointments_df.head())
-            else:
+            elif data_type == "Доходы":
                 st.dataframe(st.session_state.revenue_df.head())
+            elif data_type == "Сезонные коэффициенты":
+                st.dataframe(st.session_state.seasonal_df.head())
+            else:
+                st.dataframe(st.session_state.promo_df.head())
     
     if st.session_state.data_loaded:
         st.subheader("Прогнозирование спроса")
@@ -229,9 +247,37 @@ def phase2_schedule_generation(population_size):
         
         if st.button("Генерировать популяцию расписаний"):
             try:
+                # Создаем контейнер для логов
+                log_container = st.empty()
+                logs = []
+                
+                # Создаем прогресс-бар
+                progress_bar = st.progress(0)
+                progress_text = st.empty()
+                
+                # Функция для обновления логов
+                def update_log(message):
+                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+                    log_container.text_area("Логи процесса", "\n".join(logs), height=200)
+                
+                # Функция для обновления прогресса
+                def update_progress(percent, text):
+                    progress_bar.progress(int(percent) / 100.0)
+                    progress_text.text(f"Прогресс: {text}")
+                
+                update_log("Начинаем генерацию расписаний...")
+                update_progress(0, "Инициализация")
+                
                 from schedule_generator import ScheduleGenerator
                 
+                # Обновляем статус
+                update_log("Инициализация генератора расписаний...")
+                update_progress(10, "Подготовка данных")
+                
                 with st.spinner(f"Генерация {population_size} валидных расписаний..."):
+                    update_log("Настройка генератора расписаний...")
+                    update_progress(20, "Настройка генератора")
+                    
                     generator = ScheduleGenerator(
                         st.session_state.doctors_df,
                         st.session_state.cabinets_df,
@@ -239,20 +285,40 @@ def phase2_schedule_generation(population_size):
                     )
                     
                     # Generate population
-                    population = generator.generate_population(
-                        population_size,
-                        target_month,
-                        enforce_shifts,
-                        enforce_specializations,
-                        enforce_star_schedules,
-                        enforce_cabinet_bindings
+                    update_log("Генерация начальной популяции расписаний...")
+                    update_progress(30, "Генерация популяции")
+                    
+                    population = []
+                    
+                    # Генерируем популяцию на основе ресурсов
+                    generated_population = generator.generate_population(
+                        population_size, target_month, 
+                        enforce_shifts, enforce_specializations, 
+                        enforce_star_schedules, enforce_cabinet_bindings
                     )
                     
-                    st.session_state.population = population
-                    st.session_state.target_month = target_month
-                    st.session_state.population_generated = True
+                    if generated_population:
+                        population.extend(generated_population)
+                        update_log(f"Сгенерировано {len(population)} валидных расписаний на основе ресурсов.")
+                    else:
+                        update_log("Не удалось сгенерировать ни одного расписания на основе ресурсов.")
+
+                    update_log("Проверка и сохранение результатов...")
+                    update_progress(95, "Финализация")
                     
-                    st.success(f"Успешно сгенерировано {len(population)} валидных расписаний")
+                    # Валидация всего расписания
+                    if population and generator._is_valid_schedule(population[0]): # Проверяем первое расписание из популяции
+                        st.session_state.population = population
+                        st.session_state.population_generated = True
+                        update_log(f"Успешно сгенерировано {len(population)} валидных расписаний.")
+                        st.success(f"Успешно сгенерировано {len(population)} валидных расписаний.")
+                    else:
+                        st.session_state.population = []
+                        st.session_state.population_generated = False
+                        update_log("Не удалось сгенерировать валидное расписание. Проверьте ограничения и логи выше.")
+                        st.warning("Не удалось сгенерировать валидное расписание.")
+
+                    update_progress(100, "Завершено")
                     
             except Exception as e:
                 st.error(f"Ошибка при генерации расписаний: {str(e)}")
