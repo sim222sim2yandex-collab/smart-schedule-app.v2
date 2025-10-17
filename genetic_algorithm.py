@@ -67,28 +67,33 @@ class ScheduleOptimizer:
         # Evolution history
         evolution_history = []
         
-        # Run evolution
+            # Run evolution
         for generation in range(generations):
             # Select next generation
             offspring = self.toolbox.select(population, len(population))
             offspring = [self.toolbox.clone(ind) for ind in offspring]
             
+            crossover_applied_count = 0
             # Apply crossover
             for child1, child2 in zip(offspring[::2], offspring[1::2]):
                 if random.random() < crossover_rate:
                     self.toolbox.mate(child1, child2)
                     del child1.fitness.values
                     del child2.fitness.values
+                    crossover_applied_count += 1
             
+            mutation_applied_count = 0
             # Apply mutation
             for mutant in offspring:
                 if random.random() < mutation_rate:
                     self.toolbox.mutate(mutant)
                     del mutant.fitness.values
+                    mutation_applied_count += 1
             
             # Evaluate individuals with invalid fitness
             invalid_individuals = [ind for ind in offspring if not ind.fitness.valid]
             self._evaluate_population(invalid_individuals)
+            invalid_individuals_count = len(invalid_individuals)
             
             # Replace population
             population[:] = offspring
@@ -103,14 +108,16 @@ class ScheduleOptimizer:
                 'best_fitness': record['max'],
                 'avg_fitness': record['avg'],
                 'min_fitness': record['min'],
-                'std_fitness': record['std']
+                'std_fitness': record['std'],
+                'population_size': len(population),
+                'invalid_individuals_count': invalid_individuals_count,
+                'crossover_applied_count': crossover_applied_count,
+                'mutation_applied_count': mutation_applied_count
             })
             
             # Callback for progress updates
             if callback:
-                callback(generation, record)
-        
-        # Return best solution and evolution history
+                callback(generation, record)        # Return best solution and evolution history
         best_individual = hall_of_fame[0]
         return list(best_individual), evolution_history
     

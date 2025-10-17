@@ -485,7 +485,16 @@ def update_progress(generation, total_generations, stats, progress_bar, status_t
     """Update progress during optimization"""
     progress = generation / total_generations
     progress_bar.progress(progress)
-    status_text.text(f"Поколение {generation}/{total_generations} - Лучший результат: {stats['best_fitness']:.4f}")
+    
+    # Correctly access stats
+    best_fitness = stats.get('max', 0.0)
+    avg_fitness = stats.get('avg', 0.0)
+    population_size = stats.get('population_size', 'N/A')
+    invalid_individuals_count = stats.get('invalid_individuals_count', 'N/A')
+    crossover_applied_count = stats.get('crossover_applied_count', 'N/A')
+    mutation_applied_count = stats.get('mutation_applied_count', 'N/A')
+    
+    status_text.text(f"Поколение {generation}/{total_generations} - Лучший результат: {best_fitness:.4f} | Популяция: {population_size} | Недействительные: {invalid_individuals_count} | Скрещивания: {crossover_applied_count} | Мутации: {mutation_applied_count}")
     
     # Store evolution history
     if 'evolution_history' not in st.session_state:
@@ -493,8 +502,12 @@ def update_progress(generation, total_generations, stats, progress_bar, status_t
     
     st.session_state.evolution_history.append({
         'generation': generation,
-        'best_fitness': stats['best_fitness'],
-        'avg_fitness': stats['avg_fitness']
+        'best_fitness': best_fitness,
+        'avg_fitness': avg_fitness,
+        'population_size': population_size,
+        'invalid_individuals_count': invalid_individuals_count,
+        'crossover_applied_count': crossover_applied_count,
+        'mutation_applied_count': mutation_applied_count
     })
 
 def results_visualization():
